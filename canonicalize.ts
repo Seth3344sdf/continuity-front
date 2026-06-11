@@ -1,0 +1,6 @@
+[project]
+name = "tsl-core"
+version = "0.1.0"
+description = "Python parity helpers for the Trust Signature Layer reference implementation"
+requires-python = ">=3.9"
+dependencies = ["PyNaCl>=1.5"]
