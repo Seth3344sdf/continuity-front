@@ -1,38 +1,52 @@
 {
-  "$id": "https://spec.tsl.network/schemas/evaluation_report.v1.schema.json",
+  "$id": "https://spec.tsl.network/schemas/model_card.v2.schema.json",
   "type": "object",
   "required": [
     "type",
-    "report_id",
     "model_id",
-    "domain",
-    "dataset_commitments",
+    "provider",
+    "model_version",
+    "supported_domains",
+    "feature_registry_commitment",
+    "evaluation_report_commitment",
+    "privacy_report_commitment",
     "metrics",
-    "promotion_gate_result",
-    "red_team_result",
+    "limitations",
     "issued_at",
     "signature"
   ],
   "additionalProperties": false,
   "properties": {
     "type": {
-      "const": "tsl.evaluation_report.v1"
-    },
-    "report_id": {
-      "type": "string"
+      "const": "tsl.model_card.v2"
     },
     "model_id": {
       "type": "string"
     },
-    "domain": {
+    "provider": {
+      "type": "string",
+      "pattern": "^did:tsl:"
+    },
+    "model_version": {
       "type": "string"
     },
-    "dataset_commitments": {
+    "supported_domains": {
       "type": "array",
       "items": {
-        "type": "string",
-        "pattern": "^0x[0-9a-f]{64}$"
+        "type": "string"
       }
+    },
+    "feature_registry_commitment": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
+    },
+    "evaluation_report_commitment": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
+    },
+    "privacy_report_commitment": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
     },
     "metrics": {
       "type": "object",
@@ -40,7 +54,6 @@
         "auroc_bps",
         "auprc_bps",
         "ece_bps",
-        "coverage_bps",
         "p95_latency_ms"
       ],
       "additionalProperties": false,
@@ -60,17 +73,7 @@
           "minimum": 0,
           "maximum": 10000
         },
-        "coverage_bps": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 10000
-        },
-        "sparse_identity_fpr_bps": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 10000
-        },
-        "privacy_leakage_bps": {
+        "sparse_identity_false_positive_rate_bps": {
           "type": "integer",
           "minimum": 0,
           "maximum": 10000
@@ -78,23 +81,19 @@
         "p95_latency_ms": {
           "type": "integer",
           "minimum": 0
+        },
+        "appeal_reversal_rate_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
         }
       }
     },
-    "promotion_gate_result": {
-      "enum": [
-        "pass",
-        "fail",
-        "conditional",
-        "research_only"
-      ]
-    },
-    "red_team_result": {
-      "enum": [
-        "pass",
-        "fail",
-        "not_run"
-      ]
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "issued_at": {
       "type": "string",

@@ -1,0 +1,77 @@
+{
+  "$id": "https://spec.tsl.network/schemas/zk_circuit_release_manifest.v1.schema.json",
+  "type": "object",
+  "required": [
+    "type",
+    "circuit_id",
+    "claim",
+    "version",
+    "hash_suite",
+    "witness_interface",
+    "circuit_hash",
+    "r1cs_hash",
+    "wasm_hash",
+    "zkey_hash",
+    "verification_key_id",
+    "verification_key_hash",
+    "public_signal_schema",
+    "private_witness_schema",
+    "soundness_bits",
+    "privacy_notes",
+    "ceremony_transcript_hash",
+    "auditor",
+    "reviewer",
+    "status",
+    "signature_status",
+    "issued_at"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "active" } } },
+      "then": {
+        "properties": {
+          "signature_status": { "const": "externally_signed" }
+        },
+        "required": ["signature"]
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "tsl.zk.circuit_release_manifest.v1" },
+    "circuit_id": { "type": "string" },
+    "claim": {
+      "enum": [
+        "identity_age_days",
+        "reciprocal_receipt_count",
+        "dispute_rate_bound",
+        "organization_membership",
+        "set_membership",
+        "revocation_set_non_membership",
+        "agent_scope_compliance",
+        "private_graph_distance"
+      ]
+    },
+    "version": { "type": "string" },
+    "hash_suite": { "type": "string" },
+    "witness_interface": { "type": "string" },
+    "circuit_hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "r1cs_hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "wasm_hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "zkey_hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "verification_key_id": { "type": "string" },
+    "verification_key_hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "verification_key": { "type": "object" },
+    "public_signal_schema": { "type": "object" },
+    "private_witness_schema": { "type": "object" },
+    "soundness_bits": { "type": "integer", "minimum": 100 },
+    "privacy_notes": { "type": "array", "items": { "type": "string" } },
+    "ceremony_transcript_hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "auditor": { "type": "string", "pattern": "^did:tsl:" },
+    "reviewer": { "type": "string", "pattern": "^did:tsl:" },
+    "status": { "enum": ["dev", "draft", "reviewed", "candidate", "active", "revoked"] },
+    "signature_status": { "enum": ["unsigned", "placeholder", "externally_signed"] },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "signature": { "type": "string", "pattern": "^0x[0-9a-f]+$" }
+  }
+}

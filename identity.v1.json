@@ -1,20 +1,235 @@
 {
-  "type": "tsl.scoring_profile.v2",
-  "profile_id": "did:tsl:provider:continuity-labs/profile/anti-phishing-v2.1.0",
-  "provider": "did:tsl:provider:continuity-labs",
-  "domain": "anti_phishing",
-  "model_family": "transparent_weighted_logistic",
-  "model_version": "2.1.0",
-  "feature_registry_commitment": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "normalization_profile_commitment": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "weight_profile_commitment": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  "calibration_profile_commitment": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-  "threshold_policy_commitment": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-  "privacy_policy_commitment": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-  "evaluation_report_commitment": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "issued_at": "2026-05-25T00:00:00Z",
-  "valid_after": "2026-05-25T00:00:00Z",
-  "expires_at": "2026-08-25T00:00:00Z",
-  "signature": "0x11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
-  "platform": "gmail"
+  "$id": "https://spec.tsl.network/schemas/graph_profile.v2.schema.json",
+  "type": "object",
+  "required": [
+    "type",
+    "profile_id",
+    "edge_weight_profile",
+    "temporal_decay_profile",
+    "community_detection",
+    "seed_sets",
+    "negative_edge_policy",
+    "privacy_policy"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "const": "tsl.graph_profile.v2"
+    },
+    "profile_id": {
+      "type": "string"
+    },
+    "edge_weight_profile": {
+      "type": "string"
+    },
+    "temporal_decay_profile": {
+      "type": "string"
+    },
+    "community_detection": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "resolution_bps",
+        "min_cluster_size"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "connected_components",
+            "louvain",
+            "leiden",
+            "leiden_refinement_v0",
+            "louvain_modularity_v0",
+            "leiden_refinement_v1",
+            "louvain_modularity_v1",
+            "connected_components_v0",
+            "none"
+          ]
+        },
+        "resolution_bps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "min_cluster_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "edge_weight_floor_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "deterministic_ordering": {
+          "enum": ["node_id_lexicographic"]
+        },
+        "max_passes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "approximation_tolerance_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "refinement_threshold_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "projection": {
+          "enum": ["undirected_sum", "directed_outbound"]
+        },
+        "negative_edge_treatment": {
+          "enum": ["ignore", "cap", "signed"]
+        }
+      }
+    },
+    "seed_sets": {
+      "type": "object",
+      "required": [
+        "trusted_seed_commitment",
+        "adversarial_seed_commitment"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "trusted_seed_commitment": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "adversarial_seed_commitment": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "trusted_seed_governance_commitment": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "adversarial_seed_governance_commitment": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        }
+      }
+    },
+    "negative_edge_policy": {
+      "type": "object",
+      "required": [
+        "requires_evidence_commitment",
+        "requires_appeal_uri",
+        "max_single_negative_weight_bps",
+        "decay_days"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requires_evidence_commitment": {
+          "type": "boolean"
+        },
+        "requires_appeal_uri": {
+          "type": "boolean"
+        },
+        "max_single_negative_weight_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "decay_days": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "privacy_policy": {
+      "type": "object",
+      "required": [
+        "raw_counterparty_upload_required",
+        "allows_pairwise_private_features"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "raw_counterparty_upload_required": {
+          "type": "boolean"
+        },
+        "allows_pairwise_private_features": {
+          "type": "boolean"
+        }
+      }
+    },
+    "edge_weights": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000
+      }
+    },
+    "half_life_days": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "issuer_quality_bps": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000
+      }
+    },
+    "pagerank": {
+      "type": "object",
+      "required": ["iterations", "damping_bps"],
+      "additionalProperties": false,
+      "properties": {
+        "iterations": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "damping_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "personalization": { "enum": ["trusted_seeds", "subject", "uniform"] }
+      }
+    },
+    "manifold_profile": {
+      "type": "object",
+      "required": ["algorithm"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "enum": ["seed_distance_proxy_v1", "centroid_covariance_v1"] },
+        "feature_ordering": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ppr_distance_bps",
+              "trusted_seed_distance_proxy_bps",
+              "adversarial_seed_distance_proxy_bps",
+              "cluster_distance_proxy_bps"
+            ]
+          }
+        },
+        "trusted_centroid_commitment": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+        "adversarial_centroid_commitment": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+        "cluster_centroid_commitment": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+        "covariance_commitment": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+        "seed_commitment": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+        "trusted_centroid_bps": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        },
+        "adversarial_centroid_bps": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        },
+        "cluster_centroid_bps": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        },
+        "inverse_covariance_bps": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0, "maximum": 100000000 }
+          }
+        }
+      }
+    }
+  }
 }
