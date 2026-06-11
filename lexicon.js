@@ -1,0 +1,983 @@
+#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { Command } from "commander";
+import { createSignedMessageProof, decodeProofLink, encodeProofLink, NodeSqliteLocalStore } from "../../../packages/client-sdk-ts/src/index";
+import {
+  ZERO_HASH,
+  agentActionV2Hash,
+  buildAgentActionV2,
+  buildConsistencyProof,
+  buildAgentDelegation,
+  buildDelegationPolicyV2,
+  buildGroth16ThresholdProof,
+  buildIdentityFromSeed,
+  buildRevocation,
+  buildThresholdProof,
+  buildInclusionProof,
+  buildMerkleTree,
+  buildNonMembershipProof,
+  checkpointHash,
+  canonicalBytes,
+  createSettlementBackendFromEnv,
+  deriveEd25519PublicKey,
+  InMemoryRelayStore,
+  LocalEvmSettlementBackend,
+  randomHex32,
+  hashDomain,
+  sha256Hex,
+  signEd25519,
+  signAgentActionV2,
+  signAgentDelegation,
+  signAuditFinding,
+  signGovernancePolicy,
+  signMessageEvent,
+  signRevocation,
+  revocationCommitmentHash,
+  MemoryTrustResolver,
+  verifyAgentDelegation,
+  verifyConsistencyProof,
+  verifyNonMembershipProof,
+  verifyThresholdProof,
+  verifyThresholdProofAsync,
+  verifyTSL,
+  delegationPolicyV2Hash,
+  signDelegationPolicyV2,
+  verifyDelegatedAgentActionV0,
+  type AgentActionV2,
+  type BatchCheckpointV1,
+  type DelegationPolicyV2,
+  type Hex32,
+  type IdentityDocumentV1,
+  type GovernancePolicyUnsignedV1,
+  type ZkThresholdProofV1,
+  type VerifyTSLInput,
+  type VerifierPolicy
+} from "../../../packages/core-ts/src/index";
+
+const VECTOR = {
+  seedHex: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  contentSaltHex: "1111111111111111111111111111111111111111111111111111111111111111",
+  nonce: "0x2222222222222222222222222222222222222222222222222222222222222222" as Hex32,
+  relaySeedHex: "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  timestamp: "2026-05-25T00:01:00Z",
+  sender: "did:tsl:test:alice",
+  relay: "did:tsl:relay:test",
+  keyId: "#test-key-1",
+  relayKeyId: "#relay-key-1",
+  message: "hello-tsl"
+};
+
+function printJson(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function readJsonFile<T = Record<string, unknown>>(file: string): T {
+  return JSON.parse(readFileSync(file, "utf8")) as T;
+}
+
+function sha256File(file: string): string {
+  return `0x${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+async function postJson(url: string, body: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json() as unknown;
+  if (!response.ok) {
+    throw new Error(JSON.stringify(payload));
+  }
+  return payload;
+}
+
+async function getJson(url: string): Promise<unknown> {
+  const response = await fetch(url);
+  const payload = await response.json() as unknown;
+  if (!response.ok) {
+    throw new Error(JSON.stringify(payload));
+  }
+  return payload;
+}
+
+function createCheckpoint(commitments: Hex32[], epochStartMs: number, epochDurationMs: number, shard: string): BatchCheckpointV1 {
+  const tree = buildMerkleTree(commitments);
+  const unsigned: BatchCheckpointV1 = {
+    type: "tsl.batch_checkpoint.v1",
+    epoch_start_ms: epochStartMs,
+    epoch_duration_ms: epochDurationMs,
+    shard,
+    event_root: tree.root,
+    receipt_root: ZERO_HASH,
+    attestation_root: ZERO_HASH,
+    revocation_root: ZERO_HASH,
+    event_count: commitments.length,
+    receipt_count: 0,
+    previous_checkpoint: ZERO_HASH,
+    relay_id: VECTOR.relay,
+    relay_signature: "0x00"
+  };
+  return {
+    ...unsigned,
+    relay_signature: signEd25519(checkpointHash(unsigned), VECTOR.relaySeedHex)
+  };
+}
+
+function deterministicBundle() {
+  const identity = buildIdentityFromSeed({
+    trust_id: VECTOR.sender,
+    key_id: VECTOR.keyId,
+    seed_hex: VECTOR.seedHex,
+    created_at: "2026-05-25T00:00:00Z"
+  });
+  const relayIdentity = buildIdentityFromSeed({
+    trust_id: VECTOR.relay,
+    key_id: VECTOR.relayKeyId,
+    seed_hex: VECTOR.relaySeedHex,
+    created_at: "2026-05-25T00:00:00Z"
+  });
+  const signed = signMessageEvent({
+    sender: VECTOR.sender,
+    signing_key_id: VECTOR.keyId,
+    message: VECTOR.message,
+    seed_hex: VECTOR.seedHex,
+    timestamp: VECTOR.timestamp,
+    nonce: VECTOR.nonce,
+    content_salt: VECTOR.contentSaltHex,
+    disclosure_policy: "commitment_only"
+  });
+  const epochStartMs = Date.parse("2026-05-25T00:00:00Z");
+  const epochDurationMs = 300000;
+  const shard = "00af";
+  const checkpoint = createCheckpoint([signed.commitment_hash], epochStartMs, epochDurationMs, shard);
+  const proof = buildInclusionProof({
+    commitments: [signed.commitment_hash],
+    leaf_index: 0,
+    tree_kind: "event",
+    epoch_start_ms: epochStartMs,
+    epoch_duration_ms: epochDurationMs,
+    shard,
+    checkpoint_hash: checkpointHash(checkpoint)
+  });
+
+  return {
+    identity,
+    identities: [relayIdentity],
+    envelope: signed.envelope,
+    proof,
+    checkpoint,
+    redaction_manifest: {
+      raw_content_included: false,
+      content_salt_included: false,
+      exact_counterparties_included: false,
+      metadata_fields_redacted: [
+        "content_salt",
+        "exact_counterparties",
+        "private_graph",
+        "private_metadata",
+        "raw_content",
+        "restricted_attestations"
+      ]
+    },
+    vector: {
+      public_key_hex: deriveEd25519PublicKey(VECTOR.seedHex),
+      content_commitment_hex: signed.envelope.content_commitment,
+      canonical_unsigned_event: signed.canonical_unsigned_event,
+      event_hash_hex: signed.event_hash,
+      signature_hex: signed.envelope.signature,
+      commitment_hash_hex: signed.commitment_hash,
+      single_leaf_merkle_root_hex: proof.root
+    }
+  };
+}
+
+async function verifyBundle(bundle: Record<string, unknown>, defaultPolicy: VerifierPolicy = {}) {
+  const identities: IdentityDocumentV1[] = [];
+  if (bundle.identity_document) identities.push(bundle.identity_document as IdentityDocumentV1);
+  if (bundle.identity) identities.push(bundle.identity as IdentityDocumentV1);
+  if (Array.isArray(bundle.identities)) identities.push(...(bundle.identities as IdentityDocumentV1[]));
+
+  const resolver = new MemoryTrustResolver(identities);
+	  const input: VerifyTSLInput = {
+	    proof_bundle: bundle.type === "tsl.proof_bundle.v1" ? (bundle as unknown as VerifyTSLInput["proof_bundle"]) : undefined,
+	    envelope: bundle.envelope as VerifyTSLInput["envelope"],
+	    proof: bundle.proof as VerifyTSLInput["proof"],
+	    checkpoint: bundle.checkpoint as VerifyTSLInput["checkpoint"],
+	    redaction_manifest: bundle.redaction_manifest as VerifyTSLInput["redaction_manifest"],
+	    message_disclosure: bundle.message_disclosure as VerifyTSLInput["message_disclosure"],
+    receipts: bundle.receipts as VerifyTSLInput["receipts"],
+    attestations: bundle.attestations as VerifyTSLInput["attestations"],
+    revocations: bundle.revocations as VerifyTSLInput["revocations"],
+    assessment: bundle.assessment as VerifyTSLInput["assessment"],
+    assessment_v2: bundle.assessment_v2 as VerifyTSLInput["assessment_v2"],
+    scoring_profile: bundle.scoring_profile as VerifyTSLInput["scoring_profile"],
+    domain_policy: bundle.domain_policy as VerifyTSLInput["domain_policy"],
+    evidence_coverage: bundle.evidence_coverage as VerifyTSLInput["evidence_coverage"],
+    metadata_fingerprints: bundle.metadata_fingerprints as VerifyTSLInput["metadata_fingerprints"],
+    graph_profile: bundle.graph_profile as VerifyTSLInput["graph_profile"],
+    graph_feature_vector: bundle.graph_feature_vector as VerifyTSLInput["graph_feature_vector"],
+    trusted_seeds: bundle.trusted_seeds as VerifyTSLInput["trusted_seeds"],
+    adversarial_seeds: bundle.adversarial_seeds as VerifyTSLInput["adversarial_seeds"],
+    trusted_seed_governance: bundle.trusted_seed_governance as VerifyTSLInput["trusted_seed_governance"],
+    adversarial_seed_governance: bundle.adversarial_seed_governance as VerifyTSLInput["adversarial_seed_governance"],
+    event_receivers: bundle.event_receivers as VerifyTSLInput["event_receivers"],
+    sybil_assessment: bundle.sybil_assessment as VerifyTSLInput["sybil_assessment"],
+    sybil_profile: bundle.sybil_profile as VerifyTSLInput["sybil_profile"],
+    drift_report: bundle.drift_report as VerifyTSLInput["drift_report"],
+    drift_feature_history: bundle.drift_feature_history as VerifyTSLInput["drift_feature_history"],
+    drift_cohort_baseline_components: bundle.drift_cohort_baseline_components as VerifyTSLInput["drift_cohort_baseline_components"],
+    zk_proofs: bundle.zk_proofs as VerifyTSLInput["zk_proofs"],
+    zk_circuit_manifests: bundle.zk_circuit_manifests as VerifyTSLInput["zk_circuit_manifests"],
+    zk_verification_key_registry: bundle.zk_verification_key_registry as VerifyTSLInput["zk_verification_key_registry"],
+    delegations: bundle.delegations as VerifyTSLInput["delegations"],
+    delegation_policies: bundle.delegation_policies as VerifyTSLInput["delegation_policies"],
+    agent_actions: bundle.agent_actions as VerifyTSLInput["agent_actions"],
+    audit_findings: bundle.audit_findings as VerifyTSLInput["audit_findings"],
+    consistency_proofs: bundle.consistency_proofs as VerifyTSLInput["consistency_proofs"],
+    non_membership_proofs: bundle.non_membership_proofs as VerifyTSLInput["non_membership_proofs"],
+    governance_policy: bundle.governance_policy as VerifyTSLInput["governance_policy"],
+    disclosure_consents: bundle.disclosure_consents as VerifyTSLInput["disclosure_consents"]
+  };
+
+  const policy = (bundle.policy as VerifierPolicy | undefined) ?? defaultPolicy;
+  const settlementBackend = createSettlementBackendFromEnv();
+  return verifyTSL(input, resolver, policy, settlementBackend ?? undefined);
+}
+
+const program = new Command();
+program
+  .name("tsl")
+  .description("Trust Signature Layer reference CLI")
+  .version("0.1.0");
+
+program
+  .command("vector")
+  .description("Print the deterministic event compliance vector generated by the implementation")
+  .action(() => {
+    printJson(deterministicBundle().vector);
+  });
+
+program
+  .command("demo")
+  .description("Generate and verify a complete deterministic proof bundle")
+  .action(async () => {
+    const bundle = deterministicBundle();
+    const result = await verifyBundle(bundle, {
+      require_inclusion: true,
+      require_checkpoint: true,
+      require_settlement: false
+    });
+    printJson({ ...bundle, verification: result });
+  });
+
+program
+  .command("demo-settlement")
+  .description("Run a local EVM settlement demo against a deployed CheckpointRegistry")
+  .requiredOption("--registry-address <address>", "CheckpointRegistry contract address")
+  .option("--rpc-url <url>", "Hardhat RPC URL", "http://127.0.0.1:8545")
+  .option("--private-key <hex>", "optional submitter private key")
+  .action(async (options) => {
+    const settlement = new LocalEvmSettlementBackend({
+      rpcUrl: options.rpcUrl,
+      checkpointRegistryAddress: options.registryAddress,
+      privateKey: options.privateKey,
+      chainId: 31337
+    });
+    const store = new InMemoryRelayStore({
+      relay_id: "did:tsl:relay:test",
+      timestamp_window_ms: Number.MAX_SAFE_INTEGER,
+      settlement_backend: settlement
+    });
+    const identity = buildIdentityFromSeed({
+      trust_id: VECTOR.sender,
+      key_id: VECTOR.keyId,
+      seed_hex: VECTOR.seedHex,
+      created_at: "2026-05-25T00:00:00Z"
+    });
+    store.upsertIdentity(identity);
+    const signed = signMessageEvent({
+      sender: VECTOR.sender,
+      signing_key_id: VECTOR.keyId,
+      message: VECTOR.message,
+      seed_hex: VECTOR.seedHex,
+      timestamp: VECTOR.timestamp,
+      nonce: VECTOR.nonce,
+      content_salt: VECTOR.contentSaltHex,
+      disclosure_policy: "commitment_only"
+    });
+    const accepted = await store.acceptEvent(signed.envelope);
+    const beforeSettlement = store.proofFor(accepted.commitment_hash);
+    if (!beforeSettlement) throw new Error("Failed to build inclusion proof before settlement");
+
+    const beforeVerification = await verifyTSL(
+      {
+        envelope: signed.envelope,
+        proof: beforeSettlement.proof,
+        checkpoint: beforeSettlement.checkpoint
+      },
+      store.resolver,
+      { require_inclusion: true, require_checkpoint: true, require_settlement: true },
+      settlement
+    );
+
+    const settledCheckpoint = await store.submitCheckpoint(accepted.epoch_start_ms, accepted.shard);
+    const afterSettlement = store.proofFor(accepted.commitment_hash);
+    if (!afterSettlement) throw new Error("Failed to build inclusion proof after settlement");
+
+    const afterVerification = await verifyTSL(
+      {
+        envelope: signed.envelope,
+        proof: afterSettlement.proof,
+        checkpoint: afterSettlement.checkpoint
+      },
+      store.resolver,
+      { require_inclusion: true, require_checkpoint: true, require_settlement: true },
+      settlement
+    );
+
+    printJson({
+      accepted,
+      before_settlement_verified: beforeVerification.verified,
+      before_settlement_errors: beforeVerification.errors,
+      settled_checkpoint: settledCheckpoint,
+      after_settlement_verified: afterVerification.verified,
+      after_settlement_errors: afterVerification.errors
+    });
+  });
+
+program
+  .command("sign-message")
+  .description("Sign a message into a TSL event envelope")
+  .requiredOption("--message <message>", "message to commit")
+  .requiredOption("--seed-hex <hex>", "32-byte Ed25519 seed hex")
+  .option("--sender <trustId>", "sender TrustID")
+  .option("--key-id <keyId>", "signing key id", "#device-key-1")
+  .option("--timestamp <rfc3339>", "event timestamp")
+  .option("--nonce <hex32>", "event nonce")
+  .action((options) => {
+    const publicKey = deriveEd25519PublicKey(options.seedHex);
+    const sender = options.sender ?? `did:tsl:local:0x${publicKey}`;
+    const identity = buildIdentityFromSeed({
+      trust_id: sender,
+      key_id: options.keyId,
+      seed_hex: options.seedHex,
+      created_at: options.timestamp ?? new Date().toISOString()
+    });
+    const signed = signMessageEvent({
+      sender,
+      signing_key_id: options.keyId,
+      message: options.message,
+      seed_hex: options.seedHex,
+      timestamp: options.timestamp,
+      nonce: options.nonce,
+      disclosure_policy: "commitment_only"
+    });
+    printJson({ identity, ...signed });
+  });
+
+program
+  .command("create-identity")
+  .description("Create a deterministic local TrustID document and optionally submit it to a relay")
+  .requiredOption("--seed-hex <hex>", "32-byte Ed25519 seed hex")
+  .option("--trust-id <trustId>", "TrustID to create")
+  .option("--key-id <keyId>", "signing key id", "#device-key-1")
+  .option("--relay-url <url>", "relay base URL to submit to")
+  .action(async (options) => {
+    const publicKey = deriveEd25519PublicKey(options.seedHex);
+    const identity = buildIdentityFromSeed({
+      trust_id: options.trustId ?? `did:tsl:local:0x${publicKey}`,
+      key_id: options.keyId,
+      seed_hex: options.seedHex
+    });
+    if (options.relayUrl) {
+      const submitted = await postJson(`${options.relayUrl.replace(/\/$/, "")}/v1/identity/create`, { identity });
+      printJson({ identity, submitted });
+      return;
+    }
+    printJson({ identity });
+  });
+
+program
+  .command("submit-event")
+  .description("Submit an event envelope JSON file to a relay")
+  .argument("<file>", "JSON file containing { envelope } or an event object")
+  .requiredOption("--relay-url <url>", "relay base URL")
+  .action(async (file, options) => {
+    const payload = readJsonFile<Record<string, unknown>>(file);
+    const event = payload.envelope ?? payload.event ?? payload;
+    printJson(await postJson(`${options.relayUrl.replace(/\/$/, "")}/v1/commitments`, { event }));
+  });
+
+program
+  .command("submit-receipt")
+  .description("Submit a receipt commitment JSON file to a relay")
+  .argument("<file>", "JSON file containing { receipt } or a receipt object")
+  .requiredOption("--relay-url <url>", "relay base URL")
+  .action(async (file, options) => {
+    const payload = readJsonFile<Record<string, unknown>>(file);
+    printJson(await postJson(`${options.relayUrl.replace(/\/$/, "")}/v1/receipts`, { receipt: payload.receipt ?? payload }));
+  });
+
+program
+  .command("submit-attestation")
+  .description("Submit an attestation JSON file to a relay")
+  .argument("<file>", "JSON file containing { attestation } or an attestation object")
+  .requiredOption("--relay-url <url>", "relay base URL")
+  .action(async (file, options) => {
+    const payload = readJsonFile<Record<string, unknown>>(file);
+    printJson(await postJson(`${options.relayUrl.replace(/\/$/, "")}/v1/attestations`, { attestation: payload.attestation ?? payload }));
+  });
+
+program
+  .command("revoke-key")
+  .description("Build and optionally submit a signed key revocation")
+  .requiredOption("--trust-id <trustId>", "TrustID")
+  .requiredOption("--key-id <keyId>", "revoked key id")
+  .requiredOption("--seed-hex <hex>", "signing seed")
+  .option("--reason <reason>", "rotation | compromise | device_loss | policy_update", "compromise")
+  .option("--replacement-key <keyId>", "replacement key id for rotation")
+  .option("--relay-url <url>", "relay base URL")
+  .action(async (options) => {
+    const unsigned = buildRevocation({
+      trust_id: options.trustId,
+      revoked_key: options.keyId,
+      replacement_key: options.replacementKey,
+      reason_class: options.reason,
+      effective_at: new Date().toISOString()
+    });
+    const revocation = signRevocation(unsigned, options.seedHex);
+    const payload = { revocation, revocation_hash: revocationCommitmentHash(revocation) };
+    if (options.relayUrl) {
+      printJson({
+        ...payload,
+        submitted: await postJson(`${options.relayUrl.replace(/\/$/, "")}/v1/keys/revoke`, { revocation })
+      });
+      return;
+    }
+    printJson(payload);
+  });
+
+program
+  .command("close-epoch")
+  .description("Ask a log-node to close an epoch/shard into a checkpoint")
+  .requiredOption("--log-url <url>", "log-node base URL")
+  .requiredOption("--epoch-start-ms <ms>", "epoch start milliseconds")
+  .requiredOption("--shard <hex>", "shard prefix")
+  .option("--epoch-duration-ms <ms>", "epoch duration milliseconds", "300000")
+  .action(async (options) => {
+    printJson(await postJson(`${options.logUrl.replace(/\/$/, "")}/v1/log/close-epoch`, {
+      epoch_start_ms: Number(options.epochStartMs),
+      epoch_duration_ms: Number(options.epochDurationMs),
+      shard: options.shard
+    }));
+  });
+
+program
+  .command("fetch-proof")
+  .description("Fetch a portable proof bundle from a relay or log-node")
+  .requiredOption("--base-url <url>", "relay or log-node base URL")
+  .requiredOption("--commitment <hex32>", "commitment hash")
+  .option("--tree-kind <kind>", "event | receipt | attestation | revocation")
+  .action(async (options) => {
+    const base = options.baseUrl.replace(/\/$/, "");
+    const path = options.treeKind ? `/v1/proofs/${options.treeKind}/${options.commitment}` : `/v1/proofs/${options.commitment}`;
+    printJson(await getJson(`${base}${path}`));
+  });
+
+program
+  .command("verify-proof")
+  .description("Verify a portable proof bundle file")
+  .argument("<file>", "proof bundle JSON file")
+  .option("--require-settlement", "require configured settlement backend verification")
+  .action(async (file, options) => {
+    const bundle = readJsonFile<Record<string, unknown>>(file);
+    const result = await verifyBundle(bundle, {
+      require_inclusion: Boolean(bundle.proof),
+      require_checkpoint: Boolean(bundle.checkpoint),
+      require_settlement: Boolean(options.requireSettlement)
+    });
+    printJson(result);
+    if (!result.verified) process.exitCode = 1;
+  });
+
+program
+  .command("proof-link:create")
+  .description("Create a portable TSL proof link for a signed message")
+  .requiredOption("--message <message>", "message to commit")
+  .requiredOption("--seed-hex <hex>", "32-byte Ed25519 seed hex")
+  .option("--sender <trustId>", "sender TrustID")
+  .option("--key-id <keyId>", "signing key id", "#device-key-1")
+  .option("--base-url <url>", "proof link base URL", "http://localhost:8090/p/")
+  .action((options) => {
+    const publicKey = deriveEd25519PublicKey(options.seedHex);
+    const sender = options.sender ?? `did:tsl:local:0x${publicKey}`;
+    const proof = createSignedMessageProof({
+      trust_id: sender,
+      key_id: options.keyId,
+      seed_hex: options.seedHex,
+      message: options.message
+    });
+    const { proof_link: _defaultProofLink, ...bundle } = proof;
+    printJson({ ...bundle, proof_link: encodeProofLink(bundle, options.baseUrl) });
+  });
+
+program
+  .command("proof-link:inspect")
+  .description("Decode and inspect a TSL proof link payload")
+  .argument("<proofLink>", "proof link URL or base64url payload")
+  .action((proofLink) => {
+    printJson(decodeProofLink(proofLink));
+  });
+
+program
+  .command("zk:prove")
+  .description("Build a local threshold selective-disclosure proof object")
+  .requiredOption("--claim <claim>", "identity_age_days | reciprocal_receipt_count")
+  .requiredOption("--subject <trustId>", "subject TrustID")
+  .requiredOption("--value <n>", "private value used by the prover")
+  .requiredOption("--threshold <n>", "public threshold")
+  .option("--salt <hex32>", "witness salt")
+  .option("--wasm <path>", "compiled circuit wasm path")
+  .option("--zkey <path>", "Groth16 proving key path")
+  .action(async (options) => {
+    const input = {
+      claim: options.claim,
+      subject: options.subject,
+      value: Number(options.value),
+      threshold: Number(options.threshold),
+      witness_salt: (options.salt ?? randomHex32()) as Hex32
+    };
+    if (options.wasm && options.zkey) {
+      printJson(await buildGroth16ThresholdProof({ ...input, wasm_path: options.wasm, zkey_path: options.zkey }));
+      return;
+    }
+    printJson(buildThresholdProof(input));
+  });
+
+program
+  .command("zk:verify")
+  .description("Verify a local threshold proof object")
+  .argument("<file>", "proof JSON file")
+  .action(async (file) => {
+    const proof = readJsonFile<ZkThresholdProofV1>(file);
+    const valid = proof.groth16 ? await verifyThresholdProofAsync(proof) : verifyThresholdProof(proof);
+    printJson({ valid });
+    if (!valid) process.exitCode = 1;
+  });
+
+program
+  .command("zk:prove-receipt-count")
+  .description("Build a Groth16 proof for reciprocal_receipt_count >= threshold")
+  .requiredOption("--subject <trustId>", "subject TrustID")
+  .requiredOption("--value <n>", "private reciprocal receipt count")
+  .requiredOption("--threshold <n>", "public threshold")
+  .option("--salt <hex32>", "witness salt")
+  .option("--wasm <path>", "compiled circuit wasm path", "circuits/build/reciprocal_receipt_count_threshold_js/reciprocal_receipt_count_threshold.wasm")
+  .option("--zkey <path>", "Groth16 proving key path", "circuits/build/reciprocal_receipt_count_threshold.zkey")
+  .action(async (options) => {
+    printJson(await buildGroth16ThresholdProof({
+      claim: "reciprocal_receipt_count",
+      subject: options.subject,
+      value: Number(options.value),
+      threshold: Number(options.threshold),
+      witness_salt: (options.salt ?? randomHex32()) as Hex32,
+      wasm_path: options.wasm,
+      zkey_path: options.zkey
+    }));
+  });
+
+program
+  .command("zk:verify-receipt-count")
+  .description("Verify a reciprocal receipt count threshold proof")
+  .argument("<file>", "proof JSON file")
+  .action(async (file) => {
+    const proof = readJsonFile<ZkThresholdProofV1>(file);
+    const valid = proof.claim === "reciprocal_receipt_count" && (await verifyThresholdProofAsync(proof));
+    printJson({ valid });
+    if (!valid) process.exitCode = 1;
+  });
+
+program
+  .command("zk:manifest")
+  .description("Print release hashes for ZK circuit artifacts")
+  .action(() => {
+    const artifacts = [
+      {
+        claim: "identity_age_days",
+        circuit: "circuits/identity_age_threshold.circom",
+        r1cs: "circuits/build/identity_age_threshold.r1cs",
+        zkey: "circuits/build/identity_age_threshold.zkey",
+        verification_key: "circuits/build/identity_age_threshold.vkey.json"
+      },
+      {
+        claim: "reciprocal_receipt_count",
+        circuit: "circuits/reciprocal_receipt_count_threshold.circom",
+        r1cs: "circuits/build/reciprocal_receipt_count_threshold.r1cs",
+        zkey: "circuits/build/reciprocal_receipt_count_threshold.zkey",
+        verification_key: "circuits/build/reciprocal_receipt_count_threshold.vkey.json"
+      }
+    ];
+    printJson({
+      type: "tsl.zk.release_manifest.v1",
+      ceremony_warning: "Development-only Groth16 setup. Use an external trusted setup before production.",
+      artifacts: artifacts.map((artifact) => ({
+        ...artifact,
+        circuit_hash: sha256File(artifact.circuit),
+        r1cs_hash: sha256File(artifact.r1cs),
+        zkey_hash: sha256File(artifact.zkey),
+        verification_key_hash: sha256File(artifact.verification_key)
+      }))
+    });
+  });
+
+program
+  .command("agent:delegate")
+  .description("Create a signed legacy agent_delegation.v1 object")
+  .requiredOption("--controller <trustId>", "controller TrustID")
+  .requiredOption("--controller-key-id <keyId>", "controller key id")
+  .requiredOption("--controller-seed-hex <hex>", "controller Ed25519 seed")
+  .requiredOption("--agent <trustId>", "agent TrustID")
+  .requiredOption("--agent-key-id <keyId>", "agent key id")
+  .requiredOption("--agent-seed-hex <hex>", "agent Ed25519 seed")
+  .requiredOption("--scope <scope>", "comma-separated scopes")
+  .requiredOption("--expires-at <rfc3339>", "delegation expiry")
+  .option("--nonce <hex32>", "delegation nonce")
+  .action((options) => {
+    const delegation = signAgentDelegation(
+      buildAgentDelegation({
+        controller: options.controller,
+        controller_key_id: options.controllerKeyId,
+        agent: options.agent,
+        agent_key_id: options.agentKeyId,
+        scope: String(options.scope).split(",").map((scope) => scope.trim()).filter(Boolean),
+        expires_at: options.expiresAt,
+        nonce: (options.nonce ?? randomHex32()) as Hex32
+      }),
+      options.controllerSeedHex,
+      options.agentSeedHex
+    );
+    printJson({ delegation });
+  });
+
+program
+  .command("delegation:v2:create")
+  .description("Create and sign a delegation_policy.v2 object")
+  .requiredOption("--principal <trustId>", "principal TrustID")
+  .requiredOption("--principal-seed-hex <hex>", "principal Ed25519 seed")
+  .requiredOption("--delegate <trustId>", "delegate TrustID")
+  .requiredOption("--actions <actions>", "comma-separated allowed actions")
+  .requiredOption("--resources <resources>", "comma-separated allowed resources")
+  .requiredOption("--valid-from <rfc3339>", "policy validity start")
+  .requiredOption("--valid-until <rfc3339>", "policy validity end")
+  .requiredOption("--revocation-pointer <pointer>", "revocation pointer")
+  .option("--effect <allow|deny>", "policy effect", "allow")
+  .option("--constraints <json>", "constraints JSON", "{}")
+  .option("--subdelegation <json>", "subdelegation JSON; default deny if omitted")
+  .option("--parent-policy-id <hex32>", "parent policy id for subdelegation")
+  .option("--nonce <hex32>", "policy nonce")
+  .action((options) => {
+    const policy = signDelegationPolicyV2(
+      buildDelegationPolicyV2({
+        principal: options.principal,
+        delegate: options.delegate,
+        effect: options.effect,
+        actions: String(options.actions).split(",").map((item) => item.trim()).filter(Boolean),
+        resources: String(options.resources).split(",").map((item) => item.trim()).filter(Boolean),
+        constraints: JSON.parse(options.constraints),
+        ...(options.subdelegation ? { subdelegation: JSON.parse(options.subdelegation) } : {}),
+        ...(options.parentPolicyId ? { parent_policy_id: options.parentPolicyId as Hex32 } : {}),
+        valid_from: options.validFrom,
+        valid_until: options.validUntil,
+        revocation_pointer: options.revocationPointer,
+        ...(options.nonce ? { nonce: options.nonce as Hex32 } : {})
+      }),
+      options.principalSeedHex
+    );
+    printJson({ policy, policy_hash: delegationPolicyV2Hash(policy) });
+  });
+
+program
+  .command("agent:v2:sign-action")
+  .description("Sign an agent_action.v2 object")
+  .requiredOption("--agent <trustId>", "agent TrustID")
+  .requiredOption("--principal <trustId>", "principal TrustID")
+  .requiredOption("--agent-seed-hex <hex>", "agent Ed25519 seed")
+  .requiredOption("--action <action>", "action name")
+  .requiredOption("--resource <resource>", "resource id or URI")
+  .requiredOption("--delegation-chain-file <file>", "delegation_policy.v2 array or wrapper JSON")
+  .option("--parameters <json>", "disclosed parameters JSON", "{}")
+  .option("--tool <tool>", "tool name")
+  .option("--value-minor-units <n>", "minor-unit value")
+  .option("--human-approval-proof <proof>", "human approval proof")
+  .option("--issued-at <rfc3339>", "action issuance time")
+  .option("--nonce <hex32>", "action nonce")
+  .action((options) => {
+    const chainPayload = readJsonFile<Record<string, unknown>>(options.delegationChainFile);
+    const chain = ((chainPayload.delegation_chain ?? chainPayload.policies ?? chainPayload.delegation_policies ?? chainPayload) as DelegationPolicyV2[]).map((policy) => policy);
+    const parameters = JSON.parse(options.parameters);
+    const delegationChainRoot = sha256Hex(canonicalBytes(chain.map((policy) => delegationPolicyV2Hash(policy))));
+    const action = signAgentActionV2(
+      buildAgentActionV2({
+        agent: options.agent,
+        principal: options.principal,
+        action: options.action,
+        resource: options.resource,
+        ...(options.tool ? { tool: options.tool } : {}),
+        parameters_commitment: hashDomain("tsl.agent.parameters.v1", canonicalBytes(parameters)),
+        parameter_disclosure_policy: "selective",
+        delegation_chain_root: delegationChainRoot,
+        nonce: (options.nonce ?? randomHex32()) as Hex32,
+        ...(options.valueMinorUnits !== undefined ? { value_minor_units: Number(options.valueMinorUnits) } : {}),
+        ...(options.humanApprovalProof ? { human_approval_proof: options.humanApprovalProof } : {}),
+        issued_at: options.issuedAt
+      }),
+      options.agentSeedHex
+    );
+    printJson({ action, action_hash: agentActionV2Hash(action), parameters });
+  });
+
+program
+  .command("agent:v2:verify")
+  .description("Verify agent_action.v2 against delegation_policy.v2 chain")
+  .requiredOption("--action-file <file>", "agent_action.v2 JSON or wrapper")
+  .requiredOption("--delegation-chain-file <file>", "delegation_policy.v2 array or wrapper JSON")
+  .requiredOption("--identity-file <file...>", "identity JSON file(s) for principal and agent keys")
+  .option("--parameters <json>", "disclosed parameters JSON")
+  .option("--revoked-policy-ids <ids>", "comma-separated revoked policy ids")
+  .option("--revoked-pointers <pointers>", "comma-separated revoked pointers")
+  .action((options) => {
+    const actionPayload = readJsonFile<Record<string, unknown>>(options.actionFile);
+    const action = (actionPayload.action ?? actionPayload) as AgentActionV2;
+    const chainPayload = readJsonFile<Record<string, unknown>>(options.delegationChainFile);
+    const chain = (chainPayload.delegation_chain ?? chainPayload.policies ?? chainPayload.delegation_policies ?? chainPayload) as DelegationPolicyV2[];
+    const identities = (options.identityFile as string[]).map((file) => readJsonFile<IdentityDocumentV1>(file));
+    const publicKeys: Record<string, string> = {};
+    for (const identity of identities) {
+      const key = identity.verification_methods.find((method) => method.type === "ed25519" && method.status === "active");
+      if (key) publicKeys[identity.id] = key.public_key;
+    }
+    const result = verifyDelegatedAgentActionV0({
+      action,
+      delegation_chain: chain,
+      public_keys: publicKeys,
+      parameters: options.parameters ? JSON.parse(options.parameters) : undefined,
+      revoked_policy_ids: options.revokedPolicyIds ? String(options.revokedPolicyIds).split(",") as Hex32[] : undefined,
+      revoked_pointers: options.revokedPointers ? String(options.revokedPointers).split(",") : undefined
+    });
+    printJson({ status: result.ok ? "agent_inside_scope" : "agent_outside_scope", result });
+    if (!result.ok) process.exitCode = 1;
+  });
+
+program
+  .command("agent:sign-action")
+  .description("Sign an agent action event after checking a delegation scope")
+  .requiredOption("--delegation-file <file>", "delegation JSON file")
+  .requiredOption("--controller-identity-file <file>", "controller identity JSON file")
+  .requiredOption("--agent-identity-file <file>", "agent identity JSON file")
+  .requiredOption("--agent-seed-hex <hex>", "agent Ed25519 seed")
+  .requiredOption("--scope <scope>", "required scope")
+  .requiredOption("--message <message>", "agent action payload to commit")
+  .option("--timestamp <rfc3339>", "event timestamp")
+  .action(async (options) => {
+    const delegationPayload = readJsonFile<Record<string, unknown>>(options.delegationFile);
+    const delegation = (delegationPayload.delegation ?? delegationPayload) as NonNullable<VerifyTSLInput["delegations"]>[number];
+    const controllerIdentity = readJsonFile<IdentityDocumentV1>(options.controllerIdentityFile);
+    const agentIdentity = readJsonFile<IdentityDocumentV1>(options.agentIdentityFile);
+    const resolver = new MemoryTrustResolver([controllerIdentity, agentIdentity]);
+    const timestamp = options.timestamp ?? new Date().toISOString();
+    const delegationValid = await verifyAgentDelegation(delegation, resolver, options.scope, timestamp);
+    if (!delegationValid) {
+      printJson({ accepted: false, error: { code: "TSL_AGENT_SCOPE_INVALID", message: "Delegation does not authorize this action" } });
+      process.exitCode = 1;
+      return;
+    }
+    const signed = signMessageEvent({
+      sender: delegation.agent,
+      signing_key_id: delegation.agent_key_id,
+      message: options.message,
+      seed_hex: options.agentSeedHex,
+      event_class: "agent_call",
+      timestamp,
+      disclosure_policy: "commitment_only"
+    });
+    printJson({ accepted: true, delegation, ...signed });
+  });
+
+program
+  .command("audit:gossip")
+  .description("Create or submit a signed audit finding")
+  .requiredOption("--auditor <trustId>", "auditor TrustID")
+  .requiredOption("--auditor-seed-hex <hex>", "auditor Ed25519 seed")
+  .requiredOption("--class <class>", "finding class")
+  .requiredOption("--severity <severity>", "info | warning | critical")
+  .requiredOption("--evidence-commitment <hex32>", "evidence commitment")
+  .option("--checkpoint-hash <hex32>", "checkpoint hash")
+  .option("--epoch-start-ms <ms>", "checkpoint epoch")
+  .option("--shard <shard>", "checkpoint shard")
+  .option("--relay-url <url>", "relay/auditor base URL to submit to")
+  .action(async (options) => {
+    const finding = signAuditFinding(
+      {
+        type: "tsl.audit.finding.v1",
+        auditor: options.auditor,
+        finding_class: options.class,
+        severity: options.severity,
+        evidence_commitment: options.evidenceCommitment,
+        ...(options.checkpointHash ? { checkpoint_hash: options.checkpointHash } : {}),
+        ...(options.epochStartMs ? { epoch_start_ms: Number(options.epochStartMs) } : {}),
+        ...(options.shard ? { shard: options.shard } : {}),
+        issued_at: new Date().toISOString()
+      },
+      options.auditorSeedHex
+    );
+    if (options.relayUrl) {
+      printJson({
+        finding,
+        submitted: await postJson(`${options.relayUrl.replace(/\/$/, "")}/v1/gossip/audit-finding`, { finding })
+      });
+      return;
+    }
+    printJson({ finding });
+  });
+
+program
+  .command("audit:sync-peers")
+  .description("Ask a log or auditor node to sync gossip peers")
+  .requiredOption("--node-url <url>", "log/auditor node URL")
+  .option("--peer-url <url>", "optional single peer to sync")
+  .action(async (options) => {
+    printJson(await postJson(`${options.nodeUrl.replace(/\/$/, "")}/v1/gossip/sync`, options.peerUrl ? { peer_url: options.peerUrl } : {}));
+  });
+
+program
+  .command("consistency:audit")
+  .description("Build or verify a checkpoint consistency proof")
+  .requiredOption("--checkpoints-file <file>", "JSON array of checkpoints, or object with checkpoints")
+  .option("--verify-only", "verify an existing consistency proof file instead of building from checkpoints")
+  .action((options) => {
+    const payload = readJsonFile<Record<string, unknown> | BatchCheckpointV1[]>(options.checkpointsFile);
+    if (options.verifyOnly) {
+      const proof = (payload as Record<string, unknown>).proof ?? payload;
+      printJson({ valid: verifyConsistencyProof(proof as never) });
+      return;
+    }
+    const checkpoints = Array.isArray(payload) ? payload : (payload.checkpoints as BatchCheckpointV1[]);
+    const proof = buildConsistencyProof(checkpoints);
+    printJson({ proof, valid: verifyConsistencyProof(proof) });
+  });
+
+program
+  .command("zk:prove-non-membership")
+  .description("Build a local revocation-set non-membership proof")
+  .requiredOption("--subject <trustId>", "subject TrustID")
+  .requiredOption("--value-commitment <hex32>", "value commitment to prove absent")
+  .option("--set-file <file>", "JSON array of sorted or unsorted hex32 values", "")
+  .action((options) => {
+    const setValues = options.setFile ? readJsonFile<Hex32[]>(options.setFile) : [];
+    const proof = buildNonMembershipProof({
+      subject: options.subject,
+      value_commitment: options.valueCommitment,
+      set_values: setValues
+    });
+    printJson({ proof, valid: verifyNonMembershipProof(proof) });
+  });
+
+program
+  .command("governance:sign-policy")
+  .description("Sign a governance policy commitment object")
+  .requiredOption("--authority <trustId>", "authority TrustID")
+  .requiredOption("--authority-key-id <keyId>", "authority key id")
+  .requiredOption("--authority-seed-hex <hex>", "authority Ed25519 seed")
+  .requiredOption("--policy-id <id>", "policy id")
+  .requiredOption("--schema-commitment <hex32>", "protocol schema commitment")
+  .requiredOption("--provider-rules-commitment <hex32>", "provider rules commitment")
+  .requiredOption("--appeal-policy-commitment <hex32>", "appeal policy commitment")
+  .option("--model-card-commitment <hex32>", "model card commitment")
+  .option("--emergency-pause", "mark policy as emergency paused")
+  .option("--expires-at <rfc3339>", "policy expiry")
+  .action((options) => {
+    const unsigned: GovernancePolicyUnsignedV1 = {
+      type: "tsl.governance_policy.v1",
+      policy_id: options.policyId,
+      authority: options.authority,
+      authority_key_id: options.authorityKeyId,
+      protocol_schema_commitment: options.schemaCommitment,
+      provider_rules_commitment: options.providerRulesCommitment,
+      appeal_policy_commitment: options.appealPolicyCommitment,
+      ...(options.modelCardCommitment ? { model_card_commitment: options.modelCardCommitment } : {}),
+      emergency_pause: Boolean(options.emergencyPause),
+      issued_at: new Date().toISOString(),
+      ...(options.expiresAt ? { expires_at: options.expiresAt } : {})
+    };
+    printJson({ governance_policy: signGovernancePolicy(unsigned, options.authoritySeedHex) });
+  });
+
+program
+  .command("local-store:set")
+  .description("Write an encrypted value to the Node SQLite local privacy store")
+  .requiredOption("--db <path>", "SQLite database path")
+  .requiredOption("--passphrase <passphrase>", "local encryption passphrase")
+  .requiredOption("--key <key>", "record key")
+  .requiredOption("--json-file <file>", "JSON value file")
+  .action(async (options) => {
+    const store = await NodeSqliteLocalStore.open(options.db, options.passphrase);
+    store.set(options.key, readJsonFile(options.jsonFile));
+    printJson({ status: "accepted", key: options.key });
+  });
+
+program
+  .command("local-store:get")
+  .description("Read and decrypt a value from the Node SQLite local privacy store")
+  .requiredOption("--db <path>", "SQLite database path")
+  .requiredOption("--passphrase <passphrase>", "local encryption passphrase")
+  .requiredOption("--key <key>", "record key")
+  .option("--out <file>", "optional output file")
+  .action(async (options) => {
+    const store = await NodeSqliteLocalStore.open(options.db, options.passphrase);
+    const value = store.get(options.key);
+    if (options.out) writeFileSync(options.out, `${JSON.stringify(value, null, 2)}\n`);
+    printJson({ key: options.key, value });
+  });
+
+program
+  .command("verify-file")
+  .description("Verify a JSON proof bundle with identity/envelope/proof/checkpoint fields")
+  .argument("<file>", "path to JSON bundle")
+  .option("--require-settlement", "require configured settlement backend verification")
+  .action(async (file, options) => {
+    const bundle = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    const result = await verifyBundle(bundle, {
+      require_inclusion: Boolean(bundle.proof),
+      require_checkpoint: Boolean(bundle.checkpoint),
+      require_settlement: Boolean(options.requireSettlement)
+    });
+    printJson(result);
+    if (!result.verified) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("submit-checkpoint")
+  .description("Submit a checkpoint or proof bundle checkpoint to a local EVM CheckpointRegistry")
+  .argument("<file>", "path to checkpoint JSON or proof bundle JSON")
+  .requiredOption("--registry-address <address>", "CheckpointRegistry contract address")
+  .option("--rpc-url <url>", "Hardhat RPC URL", "http://127.0.0.1:8545")
+  .option("--private-key <hex>", "optional submitter private key")
+  .action(async (file, options) => {
+    const payload = JSON.parse(readFileSync(file, "utf8")) as { checkpoint?: BatchCheckpointV1 } | BatchCheckpointV1;
+    const checkpoint = (payload as { checkpoint?: BatchCheckpointV1 }).checkpoint ?? (payload as BatchCheckpointV1);
+    if (!checkpoint) throw new Error("No checkpoint found in input file");
+    const settlement = new LocalEvmSettlementBackend({
+      rpcUrl: options.rpcUrl,
+      checkpointRegistryAddress: options.registryAddress,
+      privateKey: options.privateKey,
+      chainId: 31337
+    });
+    const settled = await settlement.submitCheckpoint(checkpoint);
+    printJson(settled);
+  });
+
+await program.parseAsync(process.argv);
